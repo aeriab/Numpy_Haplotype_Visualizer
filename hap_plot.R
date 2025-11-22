@@ -7,11 +7,11 @@
 #   Generates a haplotype image from either genomic TSV data or .npy image batches.
 #   Auto-detects file format.
 #
-# Usage (TSV):
-#   Rscript hap_plot.R --file data.tsv --window 10300000 10400000
+# Usage (TSV) example:
+#   Rscript hap_plot.R --file data.tsv --window 10300000 10400000 --sort_type 'dist_sort'
 #
-# Usage (NPY):
-#   Rscript hap_plot.R --file batch_data.npy --image_index 5
+# Usage (NPY) example:
+#   Rscript hap_plot.R --file batch_data.npy --image_index 5 --sort_type 'cluster'
 #
 # Inputs:
 #   -f / --file : .tsv (genomic) or .npy (Batch x Ind x Sites)
@@ -33,8 +33,9 @@ get_args <- function() {
                       help="dataset file name (.tsv or .npy)")
   parser$add_argument("-o", "--out", type="character", default="hap_plot.png",
                       help="output file name; extension should be one of '.png' '.jpeg' '.pdf'")
-  parser$add_argument("--dist_sort", action="store_true", default=FALSE,
-                      help="sort by distance to representative haplotype")
+  
+  parser$add_argument("--sort_type", type="character", default="none",
+                        help="sorting method: 'none', 'cluster', or 'dist_sort'")
   
   # Window is strictly required for TSV, ignored for NPY
   parser$add_argument("--window", type="double", nargs=2, default=c(0, 0),
@@ -103,28 +104,45 @@ get_haplotype_clusters <- function(raw_haps){
   return(final_cluster_map)
 }
 
+#
 
 plot_haplotype <- function(l,r,hap,sort_mth="freq",nonsample_cols=NA,annotation=F,palette='default'){
   
-  # cluster haplotypes and prepare data frame for plotting
-  raw_hap <- hap %>% filter(site_pos >= l & site_pos <= r) %>% select(-any_of(nonsample_cols))
-  hap_clusters <- get_haplotype_clusters(raw_hap)
-
+  # 1. Identify Sample Columns (preserve original order from file)
+  #    This ensures that 'ind_2' comes after 'ind_1', not 'ind_10'
+  sample_cols <- colnames(hap)[!colnames(hap) %in% c(nonsample_cols, "site_index", "site_pos")]
+  
+  # 2. Pivot Data
   hap_df <- hap %>% mutate(site_index = rank(site_pos)) %>%
     pivot_longer(cols=-any_of(c(nonsample_cols, "site_index")), names_to = "sample", values_to = "base")
   
-  hap_df <- left_join(hap_df, hap_clusters, by="sample")
+  # 3. Default: Set Factor Levels to Original File Order ("none")
+  hap_df$sample <- factor(hap_df$sample, levels = sample_cols)
 
-  if(sort_mth == "freq"){
-    hap_df <- hap_df %>% arrange(ranked_hap_freq)
-  } else if(sort_mth == "dist"){
-    hap_df <- hap_df %>% arrange(ranked_hap_dist)
+  # 4. Conditional: Update Factor Levels if Clustering is requested
+  if (sort_mth != "none") {
+      
+      raw_hap <- hap %>% filter(site_pos >= l & site_pos <= r) %>% select(-any_of(nonsample_cols))
+      hap_clusters <- get_haplotype_clusters(raw_hap)
+      
+      # We don't strictly need to join the whole table, just get the order
+      if(sort_mth == "freq"){
+        new_order <- hap_clusters %>% arrange(ranked_hap_freq) %>% pull(sample)
+      } else if(sort_mth == "dist"){
+        new_order <- hap_clusters %>% arrange(ranked_hap_dist) %>% pull(sample)
+      }
+      
+      # Re-level the factor to the new sorted order
+      hap_df$sample <- factor(hap_df$sample, levels = new_order)
   }
-  hap_df <- hap_df %>% group_by(site_pos) %>% mutate(haplo_indices = row_number()) %>% ungroup()
-
+  
+  # 5. Generate Y-axis indices based on the Factor Integer Value
+  #    (This guarantees the plot follows the factor levels we set above)
+  hap_df$haplo_indices <- as.integer(hap_df$sample)
 
   # get axes labels
   n_samples <- length(unique(hap_df$sample))
+  # ... (rest of function below remains exactly the same)
   y_breaks <- seq(max(-n_samples,-10),-n_samples,by=-10)
 
   n_sites <- max(hap_df$site_index)
@@ -170,10 +188,22 @@ plot_haplotype <- function(l,r,hap,sort_mth="freq",nonsample_cols=NA,annotation=
   return(plt)
 }
 
+
+
+
 main <- function(){
 
   args = get_args()
-  sort_mth <- if (args$dist_sort) "dist" else "freq"
+  
+  if (args$sort_type == "cluster") {
+      sort_mth <- "freq"
+    } else if (args$sort_type == "dist_sort") {
+      sort_mth <- "dist"
+    } else {
+      # Handles "none" and any other unexpected input
+      sort_mth <- "none"
+    }
+  #sort_mth <- if (args$dist_sort) "dist" else "freq"
   
   # Detect file extension
   file_ext <- tools::file_ext(args$file)
