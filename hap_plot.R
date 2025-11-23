@@ -7,14 +7,14 @@
 #   Generates a haplotype image from either genomic TSV data or .npy image batches.
 #   Auto-detects file format.
 #
-# Usage (TSV) example:
-#   Rscript hap_plot.R --file data.tsv --window 10300000 10400000 --sort_type 'dist_sort'
+# Usage (TSV or CSV) example:
+#   Rscript hap_plot.R --file data.tsv --window 10300000 10400000 --sort_method 'dist_sort'
 #
 # Usage (NPY) example:
-#   Rscript hap_plot.R --file batch_data.npy --image_index 5 --sort_type 'cluster'
+#   Rscript hap_plot.R --file batch_data.npy --image_index 5 --sort_method 'cluster'
 #
 # Inputs:
-#   -f / --file : .tsv (genomic) or .npy (Batch x Ind x Sites)
+#   -f / --file : delimited haplotype file or .npy file (Batch x Ind x Sites or Ind x Sites)
 #   --window    : (Required for TSV) Start and End coordinates.
 #   --image_index: (Required for NPY) The index of the image/batch to plot.
 # -----------------------------------------------------------------------------
@@ -33,8 +33,8 @@ get_args <- function() {
   parser$add_argument("-o", "--out", type="character", default="hap_plot.png",
                       help="output file name; extension should be one of '.png' '.jpeg' '.pdf'")
   
-  parser$add_argument("--sort_type", type="character", default="none",
-                        help="sorting method: 'none', 'cluster', or 'dist_sort'")
+  parser$add_argument("--sort_method", type="character", default="frequency",
+                        help="sorting method: 'none', 'frequency', or 'distance'")
   
   # Window is strictly required for TSV, ignored for NPY
   # PJL -- in a previous version this was not required -- i.e. you could plot the 
@@ -51,8 +51,8 @@ get_args <- function() {
   
   parser$add_argument("--annotate", action="store_true", default=FALSE,
                       help="annotate region in plot")
-  parser$add_argument("--color_by", type="character", default="none",
-                      help="name of column to color minor alleles by (e.g. 'site_type')")
+  parser$add_argument("--palette", type="character", default="default",
+                      help="how to color minor alleles -- default or site_type ('site_type' column must be in input.)")
   parser$add_argument("--expanded_region", type="double", nargs=2, default=c(0, 0),
                       help="expanded region to plot (and not cluster by); (start end)")
   parser$add_argument("--nonsample_cols", type="character", nargs="*",
@@ -70,9 +70,7 @@ get_haplotype_clusters <- function(raw_haps){
   # get hamming (manhattan) distances between haplotypes, 
   # and do hierarchical clustering (average ~ UPGMA)
 
-  # FIX: Handle NAs by replacing with 0 before distance calc to prevent crash
   matrix_haps <- t(raw_haps)
-  matrix_haps[is.na(matrix_haps)] <- 0
   
   hap_dists <- dist(matrix_haps, method="manhattan")
   hap_clust <- hclust(hap_dists, method="average")
@@ -110,11 +108,11 @@ get_haplotype_clusters <- function(raw_haps){
 
 #
 
-plot_haplotype <- function(l,r,hap,sort_mth="freq",nonsample_cols=NA,annotation=F,palette='default'){
+plot_haplotype <- function(l,r,hap,sort_method="frequency",nonsample_cols=NA,annotation=F,palette='default'){
   
   # 1. Identify Sample Columns (preserve original order from file)
   #    This ensures that 'ind_2' comes after 'ind_1', not 'ind_10'
-  sample_cols <- colnames(hap)[!colnames(hap) %in% c(nonsample_cols, "site_index", "site_pos")]
+  sample_cols <- colnames(hap)[!colnames(hap) %in% nonsample_cols]
   
   # 2. Pivot Data
   hap_df <- hap %>% mutate(site_index = rank(site_pos)) %>%
@@ -124,15 +122,18 @@ plot_haplotype <- function(l,r,hap,sort_mth="freq",nonsample_cols=NA,annotation=
   hap_df$sample <- factor(hap_df$sample, levels = sample_cols)
 
   # 4. Conditional: Update Factor Levels if Clustering is requested
-  if (sort_mth != "none") {
+  if (sort_method != "none") {
       
-      raw_hap <- hap %>% filter(site_pos >= l & site_pos <= r) %>% select(-any_of(nonsample_cols))
+      raw_hap <- hap %>% filter(site_pos >= l & site_pos <= r) %>% 
+                         select(-any_of(nonsample_cols)) %>% 
+                         select(where(~ !all(is.na(.)))) # filter out all-NA columns
+                                
       hap_clusters <- get_haplotype_clusters(raw_hap)
       
       # We don't strictly need to join the whole table, just get the order
-      if(sort_mth == "freq"){
+      if(sort_method == "frequency"){
         new_order <- hap_clusters %>% arrange(ranked_hap_freq) %>% pull(sample)
-      } else if(sort_mth == "dist"){
+      } else if(sort_method == "distance"){
         new_order <- hap_clusters %>% arrange(ranked_hap_dist) %>% pull(sample)
       }
       
@@ -169,6 +170,16 @@ plot_haplotype <- function(l,r,hap,sort_mth="freq",nonsample_cols=NA,annotation=
     pos_label <- paste0(pos_label, " (kb)")
   }
 
+  if(palette == 'site_type'){
+    hap_df <- hap_df %>% mutate(base = case_when(
+      base == 0 ~ "0",
+      site_type == 'syn' & base == 1 ~ "1",
+      site_type == 'nonsyn' & base == 1 ~ "2",
+      site_type == "non_coding" & base == 1 ~ "3",
+      .default = "1"
+    ))
+  }
+
   # make plot
   plt <- ggplot(hap_df,aes(x=site_index,y=desc(haplo_indices), fill=as.character(base)))
   plt <- plt + geom_tile(show.legend = F)
@@ -177,10 +188,10 @@ plot_haplotype <- function(l,r,hap,sort_mth="freq",nonsample_cols=NA,annotation=
                          labels=x_labels,expand=c(0.01,0)) +
       scale_y_continuous(breaks=y_breaks,labels=abs, expand=c(0.01,0))
     
-  if(colorby_column == 'none'){
+  if(palette == 'default'){
     plt <- plt + scale_fill_manual(values=c("0"="grey87","1"="steelblue2"),na.value="white")
-  } else if (colorby_column == 'site_type'){
-    plt <- plt + scale_fill_manual(values=c("0"="grey87","1"="steelblue2","2"="firebrick3"),na.value="white")
+  } else if (palette == 'site_type'){
+    plt <- plt + scale_fill_manual(values=c("0"="grey87","1"="steelblue2","2"="firebrick3","3"="orange3"),na.value="white")
   }
 
   if(annotation){
@@ -199,15 +210,7 @@ main <- function(){
 
   args = get_args()
   
-  if (args$sort_type == "cluster") {
-      sort_mth <- "freq"
-    } else if (args$sort_type == "dist_sort") {
-      sort_mth <- "dist"
-    } else {
-      # Handles "none" and any other unexpected input
-      sort_mth <- "none"
-    }
-  #sort_mth <- if (args$dist_sort) "dist" else "freq"
+  sort_mth <- args$sort_method # "none", "frequency", "distance"
   
   # Detect file extension
   file_ext <- tools::file_ext(args$file)
@@ -217,19 +220,24 @@ main <- function(){
   r <- 0
   
   # handle nonsample_cols
-  nonsample_cols <- c("site_pos")
+  nonsample_cols <- c("site_pos", "site_type", "contig", "gene")
 
   # ---------------------
-  # MODE 1: .tsv File
+  # MODE 1: delimited file
   # ---------------------
-  if (file_ext == "tsv" || file_ext == "txt") {
+  if (file_ext %in% c("tsv", "txt", "csv")) {
     
     # Enforce Window Argument
     if ((args$window[1] == 0) & (args$window[2] == 0)) {
       stop("Error: For .tsv files, you must specify a --window (e.g., --window 10000 20000)")
     }
     
-    hap <- read_tsv(args$file)
+    if(file_ext == "tsv" || file_ext == "txt"){
+      delim_char <- "\t"
+    } else if (file_ext == "csv"){
+      delim_char <- ","
+    }
+    hap <- read_delim(args$file, delim=delim_char, col_types = cols())
     
     # Handle nonsample columns
     if (!is.null(args$nonsample_cols)) {
@@ -259,7 +267,7 @@ main <- function(){
       stop("Error: To read .npy files, please install either the 'RcppCNPy' or 'reticulate' package.")
     }
 
-    if require("reticulate"){
+    if(require("reticulate")){
       np <- import("numpy")
       full_array <- np$load(args$file)
     } else if (require("RcppCNPy") & args$image_index == -1){
@@ -296,7 +304,7 @@ main <- function(){
   # ---------------------
   # PLOTTING
   # ---------------------
-  p <- plot_haplotype(l, r, hap, sort_mth=sort_mth, nonsample_cols=nonsample_cols, annotation=args$annotate, colorby_column=args$color_by)
+  p <- plot_haplotype(l, r, hap, sort_method=sort_mth, nonsample_cols=nonsample_cols, annotation=args$annotate, palette=args$palette)
   ggsave(args$out, plot=p, width=args$width, height=args$height)
 }
 
