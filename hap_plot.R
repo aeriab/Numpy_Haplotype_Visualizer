@@ -1,4 +1,6 @@
-# Peter Laurin
+#!/usr/bin/env Rscript
+
+# Peter Laurin and Brendan Aeria
 # Nov 18, 2025 (Modified Nov 20, 2025 for numpy Support)
 # General use haplotype plotting script
 
@@ -19,18 +21,18 @@
 #   --image_index: (Required for NPY) The index of the image/batch to plot.
 # -----------------------------------------------------------------------------
 
-library(dplyr)
-library(ggplot2)
-library(readr)
-library(magrittr)
-library(tidyr)
-library(argparse)
+library(dplyr, warn.conflicts = FALSE)
+library(ggplot2, warn.conflicts = FALSE)
+library(readr, warn.conflicts = FALSE)
+library(magrittr, warn.conflicts = FALSE)
+library(tidyr, warn.conflicts = FALSE)
+library(argparse, warn.conflicts = FALSE)
 
 get_args <- function() {
   parser <- ArgumentParser(description = "General use haplotype plotting script")
-  parser$add_argument("-f", "--file", type="character", required=TRUE,
-                      help="dataset file name (.tsv or .npy)")
-  parser$add_argument("-o", "--out", type="character", default="hap_plot.png",
+  parser$add_argument("-f", "--file", type="character", required=TRUE, metavar="PATH",
+                      help="input file name (should be .tsv, .csv, or .npy).")
+  parser$add_argument("-o", "--out", type="character", default="hap_plot.png", metavar="PATH",
                       help="output file name; extension should be one of '.png' '.jpeg' '.pdf'")
   
   parser$add_argument("--sort_method", type="character", default="frequency",
@@ -39,8 +41,8 @@ get_args <- function() {
   # Window is strictly required for TSV, ignored for NPY
   # PJL -- in a previous version this was not required -- i.e. you could plot the 
   # entire hap file, by default. Can we revert to this version? 
-  parser$add_argument("--window", type="double", nargs=2, default=c(0, 0),
-                      help="window region to plot / cluster haplotypes by; (start end)")
+  parser$add_argument("--window", type="double", nargs=2, default=c(0, 0), metavar=c("START", "END"),
+                      help="window region to plot / cluster haplotypes by")
   
   # Image index is strictly required for NPY, ignored for TSV
   # PJL -- likewise, can we make this optional, defaulting to an assumption that
@@ -50,17 +52,19 @@ get_args <- function() {
                       help="Image batch index. Required for .npy")
   
   parser$add_argument("--annotate", action="store_true", default=FALSE,
-                      help="annotate region in plot")
+                      help="annotate WINDOW region in plot")
   parser$add_argument("--palette", type="character", default="default",
-                      help="how to color minor alleles -- default or site_type ('site_type' column must be in input.)")
-  parser$add_argument("--expanded_region", type="double", nargs=2, default=c(0, 0),
-                      help="expanded region to plot (and not cluster by); (start end)")
+                      help="how to color minor alleles: 'default' or 'site_type' ('site_type' column must be in input.)")
+  parser$add_argument("--expanded_region", type="double", nargs=2, default=c(0, 0), metavar=c("START", "END"),
+                      help="expanded region to plot (and not cluster by)")
   parser$add_argument("--nonsample_cols", type="character", nargs="*",
-                      help="non-sample columns (space separated)")
+                      help="non-sample columns (space separated). Commonly used columns for our lab (e.g. contig, gene_id) are automatically included.")
   parser$add_argument("--width", type="double", default=6,
                       help="output figure width")
   parser$add_argument("--height", type="double", default=4,
                       help="output figure height")
+  parser$add_argument("--polarize_to_minor", action="store_true", default=FALSE,
+                      help="polarize minor alleles to 1, major alleles to 0")
   args <- parser$parse_args()
   return(args)
 }
@@ -85,7 +89,7 @@ get_haplotype_clusters <- function(raw_haps){
 
   # map samples to clusters, ranked by frequency
   cluster_map <- tibble(sample = names(raw_cluster), raw_cluster) %>%
-    left_join(cluster_counts) %>%
+    left_join(cluster_counts,by='raw_cluster') %>%
     arrange(ranked_hap)
 
 
@@ -108,13 +112,18 @@ get_haplotype_clusters <- function(raw_haps){
 
 #
 
-plot_haplotype <- function(l,r,hap,sort_method="frequency",nonsample_cols=NA,annotation=F,palette='default'){
+plot_haplotype <- function(l,r,hap,sort_method="frequency",nonsample_cols=NA,annotation=F,palette='default', polarize=F){
   
   # 1. Identify Sample Columns (preserve original order from file)
   #    This ensures that 'ind_2' comes after 'ind_1', not 'ind_10'
   sample_cols <- colnames(hap)[!colnames(hap) %in% nonsample_cols]
   
   # 2. Pivot Data
+  if(polarize){
+    afs <- rowMeans(hap %>% select(all_of(sample_cols)), na.rm=TRUE)
+    to_polarize <- afs > 0.5
+    hap[to_polarize, sample_cols] <- 1 - hap[to_polarize, sample_cols]
+  }
   hap_df <- hap %>% mutate(site_index = rank(site_pos)) %>%
     pivot_longer(cols=-any_of(c(nonsample_cols, "site_index")), names_to = "sample", values_to = "base")
   
@@ -176,7 +185,7 @@ plot_haplotype <- function(l,r,hap,sort_method="frequency",nonsample_cols=NA,ann
       is.na(base) ~ NA, 
       site_type == 'syn' & base == 1 ~ "1",
       site_type == 'nonsyn' & base == 1 ~ "2",
-      site_type == "non_coding" & base == 1 ~ "3",
+      site_type %in% c("non_coding","NC") & base == 1 ~ "3",
       .default = "1"
     ))
   }
@@ -192,7 +201,7 @@ plot_haplotype <- function(l,r,hap,sort_method="frequency",nonsample_cols=NA,ann
   if(palette == 'default'){
     plt <- plt + scale_fill_manual(values=c("0"="grey87","1"="steelblue2"),na.value="white")
   } else if (palette == 'site_type'){
-    plt <- plt + scale_fill_manual(values=c("0"="grey87","1"="steelblue2","2"="firebrick3","3"="orange3"),na.value="white")
+    plt <- plt + scale_fill_manual(values=c("0"="grey87","1"="steelblue2","2"="firebrick3","3"="orange2"),na.value="white")
   }
 
   if(annotation){
@@ -305,7 +314,7 @@ main <- function(){
   # ---------------------
   # PLOTTING
   # ---------------------
-  p <- plot_haplotype(l, r, hap, sort_method=sort_mth, nonsample_cols=nonsample_cols, annotation=args$annotate, palette=args$palette)
+  p <- plot_haplotype(l, r, hap, sort_method=sort_mth, nonsample_cols=nonsample_cols, annotation=args$annotate, palette=args$palette, polarize=args$polarize_to_minor)
   ggsave(args$out, plot=p, width=args$width, height=args$height)
 }
 
