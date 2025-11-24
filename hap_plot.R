@@ -173,6 +173,7 @@ plot_haplotype <- function(l,r,hap,sort_method="frequency",nonsample_cols=NA,ann
   if(palette == 'site_type'){
     hap_df <- hap_df %>% mutate(base = case_when(
       base == 0 ~ "0",
+      is.na(base) ~ NA, 
       site_type == 'syn' & base == 1 ~ "1",
       site_type == 'nonsyn' & base == 1 ~ "2",
       site_type == "non_coding" & base == 1 ~ "3",
@@ -220,7 +221,7 @@ main <- function(){
   r <- 0
   
   # handle nonsample_cols
-  nonsample_cols <- c("site_pos", "site_type", "contig", "gene")
+  nonsample_cols <- c("site_pos", "site_type", "contig", "gene_id")
 
   # ---------------------
   # MODE 1: delimited file
