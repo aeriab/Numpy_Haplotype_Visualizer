@@ -158,3 +158,6 @@ haplotype most diverged from the most frequent is plotted last.
 
 Feel free to submit a pull request or raise an issue on GitHub!
 
+
+Brendan Uses this for numpy files:
+Rscript hap_plot.R --file hard_sorted_color.npy --image_index -2 --out ./my_haplotype_folder --sort_method 'none'
